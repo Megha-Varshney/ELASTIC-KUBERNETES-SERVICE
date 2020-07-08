@@ -1,0 +1,256 @@
+------------------------------------------------------------------Cluster.yml------------------------------------------------------------------------------------
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+    name: EKSCLUSTER
+    region: ap-south-1
+nodeGroups:
+    - name: nodegroup1
+      desiredCapacity: 3
+      instanceType: t2.micro
+      
+ -------------------------------------------------------------------pvc.yml----------------------------------------------------------------------------------------
+ apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+    name: mypvc
+spec:
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: 16Gi
+        
+--------------------------------------------------------------------sc.yml-------------------------------------------------------------------------------------------
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata: 
+  name: sc1
+provisioner: kubernetes.io/aws-ebs
+parameters:
+  type: io1
+reclaimPolicy: Retain
+
+-------------------------------------------------------------------EFS-Provisioner.yml-------------------------------------------------------------------------------
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: efs-provisioner
+spec:
+  selector:
+    matchLabels:
+      app: efs-provisioner
+  replicas: 1
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: efs-provisioner
+    spec:
+      containers:
+        - name: efs-provisioner
+          image: quay.io/external_storage/efs-provisioner:v0.1.0
+          env:
+            - name: FILE_SYSTEM_ID
+              value: fs-c2e66d13
+            - name: AWS_REGION
+              value: ap-south-1
+            - name: PROVISIONER_NAME
+              value: lw-course/aws-efs
+          volumeMounts:
+            - name: pv-volume
+              mountPath: /persistentvolumes
+      volumes:
+        - name: pv-volume
+          nfs:
+            server: fs-c2e66d13.efs.ap-south-1.amazonaws.com
+            path: /
+       
+ -----------------------------------------------------------------------f1.yml-------------------------------------------------------------------------------------
+ apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: nfs-provisioner-role-binding
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: lwns
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+
+ --------------------------------------------------------------------storage.yml------------------------------------------------------------------------------------
+ kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: aws-efs
+provisioner: lw-course/aws-efs
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: wp-pvc
+  annotations:
+    volume.beta.kubernetes.io/storage-class: "aws-efs"
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: sql-pvc
+  annotations:
+    volume.beta.kubernetes.io/storage-class: "aws-efs"
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+ 
+ ---------------------------------------------------------------------sql.yml------------------------------------------------------------------------------------------
+ apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-wordpress
+  labels:
+    app: wordpress
+spec:
+  ports:
+    - port: 3306
+  selector:
+    app: wordpress
+    tier: mysql
+  clusterIP: None
+---
+apiVersion: apps/v1 # for versions before 1.9.0 use apps/v1beta2
+kind: Deployment
+metadata:
+  name: mysql-wordpress
+  labels:
+    app: wordpress
+spec:
+  selector:
+    matchLabels:
+      app: wordpress
+      tier: mysql
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: wordpress
+        tier: mysql
+    spec:
+      containers:
+      - image: mysql:5.6
+        name: mysql
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-pass
+              key: password
+        ports:
+        - containerPort: 3306
+          name: mysql
+        volumeMounts:
+        - name: mysql-persistent-storage
+          mountPath: /var/lib/mysql
+      volumes:
+      - name: mysql-persistent-storage
+        persistentVolumeClaim:
+          claimName: sql-pvc
+          
+--------------------------------------------------------------------wp.yml-----------------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress
+  labels:
+    app: wordpress
+spec:
+  ports:
+    - port: 80
+  selector:
+    app: wordpress
+    tier: frontend
+  type: LoadBalancer
+---
+apiVersion: apps/v1 # for versions before 1.9.0 use apps/v1beta2
+kind: Deployment
+metadata:
+  name: wordpress
+  labels:
+    app: wordpress
+spec:
+  selector:
+    matchLabels:
+      app: wordpress
+      tier: frontend
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: wordpress
+        tier: frontend
+    spec:
+      containers:
+      - image: wordpress:4.8-apache
+        name: wordpress
+        env:
+        - name: WORDPRESS_DB_HOST
+          value: wordpress-mysql
+        - name: WORDPRESS_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-pass
+              key: password
+        ports:
+        - containerPort: 80
+          name: wordpress
+        volumeMounts:
+        - name: wordpress-persistent-storage
+          mountPath: /var/www/html
+      volumes:
+      - name: wordpress-persistent-storage
+        persistentVolumeClaim:
+          claimName: wp-pvc
+         
+------------------------------------------------------------------kustomization.yml-----------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+secretGenerator: 
+- name: mysql-pass
+  literals:
+  - password=me@1234
+resources:
+  - EFS-Provisioner.yml
+  - f1.yml
+  - storage.yml
+  - sql.yml
+  - wp.yml 
+ 
+ -------------------------------------------------------------------------------Cluster2.yml-------------------------------------------------------------------------
+ apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: fargate-cluster
+  region: ap-southeast-1
+
+fargateProfiles:
+  - name: fargate-default
+    selectors:
+     - namespace: kube-system
+     - namespace: default
+ 
+
+ 
